@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EHF Service Waste Map</title>
+<meta name="description" content="Oil and gas waste pits and commercial waste disposal facilities in the Episcopal Health Foundation service area, from Texas Railroad Commission records as of Aug. 31, 2026.">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root {
+    --ink: #1d2433; --muted: #5b6577; --panel: #ffffff; --line: #d9dee7;
+    --pitA: #8c6d31; --pitB: #1f78b4; --cwd: #c62828; --new: #e66a00; --renew: #6a1b9a;
+    --area: #4a6fa5;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #eef1f5; color: var(--ink);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  #map { position: absolute; inset: 0; }
+  .panel { background: var(--panel); border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.25); }
+  .title { padding: 10px 14px; max-width: 320px; }
+  .title h1 { font-size: 18px; margin: 0 0 2px; }
+  .title p { margin: 0; color: var(--muted); font-size: 12.5px; }
+  .legend { padding: 10px 12px; min-width: 250px; }
+  .legend h2 { font-size: 13px; margin: 0 0 6px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+    display: flex; justify-content: space-between; align-items: center; }
+  .legend h2 button { margin-left: 12px; border: 0; background: none; font-size: 12px; color: var(--muted); cursor: pointer; padding: 0; display: none; }
+  .legend label { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; user-select: none; }
+  .legend input { margin: 0; width: 16px; height: 16px; accent-color: var(--ink); }
+  .legend .sym { width: 24px; display: inline-flex; justify-content: center; }
+  .legend .n { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; padding-left: 10px; }
+  .legend .note { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--muted); max-width: 260px; }
+  .legend .note a { color: inherit; }
+  .diamond { pointer-events: none; }
+  .diamond svg path { pointer-events: visiblePainted; cursor: pointer; }
+  .leaflet-popup-content { margin: 12px 14px; font-size: 13px; min-width: 240px; max-width: 320px; }
+  .pop h3 { margin: 0 0 2px; font-size: 14px; }
+  .pop .kind { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+  .pop table { border-collapse: collapse; width: 100%; }
+  .pop td { padding: 1px 0; vertical-align: top; }
+  .pop td:first-child { color: var(--muted); padding-right: 10px; white-space: nowrap; }
+  .pop .permits { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; max-height: 190px; overflow-y: auto; }
+  .pop .permits h4 { margin: 0 0 4px; font-size: 12px; color: var(--muted); }
+  .pop .permit { padding: 4px 0; border-bottom: 1px dotted var(--line); font-size: 12px; }
+  .pop .permit:last-child { border-bottom: 0; }
+  .pop .permit b { font-variant-numeric: tabular-nums; }
+  .pop .pending { color: var(--new); font-weight: 600; }
+  .pop .flag { margin-top: 6px; padding: 5px 7px; background: #fff4e5; border-radius: 4px; font-size: 12px; color: #8a4b00; }
+  @media (max-width: 640px) {
+    .title { max-width: 210px; padding: 8px 10px; }
+    .title h1 { font-size: 15px; }
+    .title p { display: none; }
+    .legend { min-width: 0; }
+    .legend h2 button { display: inline; }
+    .legend.collapsed .body { display: none; }
+    .legend.collapsed h2 { margin: 0; }
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const STYLE = {
+  pitA:      { label: 'Solid Waste Pit',                       color: '#8c6d31' },
+  pitB:      { label: 'Produced Water Pit',                    color: '#1f78b4' },
+  cwd:       { label: 'CWD Facility',                          color: '#c62828' },
+  cwd_new:   { label: 'CWD Facility (permit upcoming)',        color: '#e66a00' },
+  cwd_renew: { label: 'CWD Facility (renewal pending)',        color: '#6a1b9a' },
+};
+const ORDER = ['pitA', 'pitB', 'cwd', 'cwd_new', 'cwd_renew'];
+const PIT_TYPES = { CompletionWorkover: 'Completion/workover', 'CompletionWorkover-30': 'Completion/workover (30-day)',
+  MakeupWater: 'Makeup water', FreshMiningWater: 'Fresh mining water', 'FreshMiningWater-30': 'Fresh mining water (30-day)',
+  ProducedWaterRecycling: 'Produced water recycling', MudCirculation: 'Mud circulation', WaterCondensate: 'Water condensate', Reserve: 'Reserve' };
+
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const row = (k, v) => v ? `<tr><td>${k}</td><td>${esc(v)}</td></tr>` : '';
+const num = v => v ? Number(v).toLocaleString('en-US') : v;
+const flag = p => p.flag ? `<div class="flag">&#9888; ${esc(p.flag)}</div>` : '';
+const pitType = t => t ? t.split(',').map(x => PIT_TYPES[x.trim()] || x.trim()).join(', ') : t;
+
+// diamond symbols: solid, dashed hollow, and a larger hollow frame for renewals
+function diamondSVG(key, size) {
+  const c = STYLE[key].color, h = size / 2, i = key === 'cwd' ? 1.5 : 2.5;
+  const pts = `M${h} ${i} L${size - i} ${h} L${h} ${size - i} L${i} ${h} Z`;
+  if (key === 'cwd') return `<svg width="${size}" height="${size}"><path d="${pts}" fill="${c}" stroke="#fff" stroke-width="1.5"/></svg>`;
+  if (key === 'cwd_new') return `<svg width="${size}" height="${size}"><path d="${pts}" fill="rgba(255,255,255,.75)" stroke="${c}" stroke-width="2.5" stroke-dasharray="4 2.5"/></svg>`;
+  return `<svg width="${size}" height="${size}"><path d="${pts}" fill="none" stroke="${c}" stroke-width="3"/></svg>`;
+}
+const SIZES = { cwd: 15, cwd_new: 20, cwd_renew: 25 };
+const legendSym = key => key.startsWith('pit')
+  ? `<svg width="14" height="14"><circle cx="7" cy="7" r="${key === 'pitB' ? 5.5 : 4.5}" fill="${STYLE[key].color}" fill-opacity=".8" stroke="#fff" stroke-width="1"/></svg>`
+  : diamondSVG(key, SIZES[key] - (key === 'cwd_renew' ? 3 : 0));
+
+function pitPopup(p, key) {
+  return `<div class="pop"><div class="kind" style="color:${STYLE[key].color}">${STYLE[key].label}</div>
+    <h3>${esc(p.operator)}</h3><table>
+    ${row('Registration #', p.reg)}${row('Lease', p.lease)}${row('Pit name', p.pitName)}${row('Pit use', pitType(p.pitType))}
+    ${row('County', p.county)}${row('RRC district', p.district)}${row('Effective', p.effective)}${row('Certified', p.certified)}
+    ${row('Size (L x W x D, ft)', p.dims)}${row('Capacity (bbl)', num(p.capacity))}${row('Groundwater depth (ft)', p.gw)}
+    ${row('API #', p.api)}${row('Lat / long', `${p.lat}, ${p.lon}`)}</table>${flag(p)}</div>`;
+}
+function sitePopup(s, key) {
+  const permits = s.permits.map(p => `<div class="permit"><b>${esc(p.permit)}</b> &middot; ${esc(p.type)}<br>
+      <span class="${p.status === 'Pending' ? 'pending' : ''}">${esc(p.status)}</span>
+      ${p.app ? `&middot; latest: ${esc(p.app)}${p.appDate ? ' ' + esc(p.appDate) : ''}` : ''}
+      ${p.exp ? `<br>Expires ${esc(p.exp)}` : ''}</div>`).join('');
+  return `<div class="pop"><div class="kind" style="color:${STYLE[key].color}">${STYLE[key].label}</div>
+    <h3>${esc(s.name)}</h3><table>${row('Operator', s.operator)}${row('County', s.county)}${row('RRC district', s.district)}
+    ${row('EPS facility ID', s.fid)}${row('Lat / long', `${s.lat}, ${s.lon}`)}</table>${flag(s)}
+    <div class="permits"><h4>All permits at this site (${s.permits.length})</h4>${permits}</div></div>`;
+}
+
+const map = L.map('map', { zoomControl: false, preferCanvas: true });
+L.control.zoom({ position: 'bottomright' }).addTo(map);
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+  maxZoom: 16, attribution: 'Basemap &copy; Esri, HERE, Garmin, &copy; OpenStreetMap contributors'
+}).addTo(map);
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}', {
+  maxZoom: 16, pane: 'shadowPane'
+}).addTo(map);
+map.createPane('area'); map.getPane('area').style.zIndex = 350;
+
+const Title = L.Control.extend({ options: { position: 'topleft' }, onAdd() {
+  const d = L.DomUtil.create('div', 'panel title');
+  d.innerHTML = '<h1>EHF Service Waste Map</h1><p>Oil and gas waste pits and commercial waste disposal (CWD) facilities in the Episcopal Health Foundation service area. Click any point for details.</p>';
+  return d;
+}});
+new Title().addTo(map);
+
+fetch('data.json').then(r => r.json()).then(data => {
+  const area = L.geoJSON(data.counties, { pane: 'area', style: { color: '#4a6fa5', weight: 0.8, opacity: 0.6, fillColor: '#4a6fa5', fillOpacity: 0.07 } })
+    .bindTooltip(l => l.feature.properties.name + ' County', { sticky: true, direction: 'top', opacity: 0.85 }).addTo(map);
+  map.fitBounds(area.getBounds(), { padding: [10, 10] });
+
+  const groups = {};
+  for (const key of ORDER) {
+    const g = L.layerGroup();
+    for (const p of data.layers[key]) {
+      let m;
+      if (key.startsWith('pit')) {
+        m = L.circleMarker([p.lat, p.lon], { radius: key === 'pitB' ? 5.5 : 4, color: '#fff', weight: 0.8,
+          fillColor: STYLE[key].color, fillOpacity: 0.8 }).bindPopup(() => pitPopup(p, key));
+      } else {
+        const sz = SIZES[key];
+        m = L.marker([p.lat, p.lon], { icon: L.divIcon({ className: 'diamond', html: diamondSVG(key, sz), iconSize: [sz, sz] }),
+          zIndexOffset: key === 'cwd' ? 1000 : key === 'cwd_new' ? 2000 : 500, title: p.name || '' }).bindPopup(() => sitePopup(p, key));
+      }
+      g.addLayer(m);
+    }
+    groups[key] = g.addTo(map);
+  }
+
+  const Legend = L.Control.extend({ options: { position: 'topright' }, onAdd() {
+    const d = L.DomUtil.create('div', 'panel legend' + (innerWidth <= 640 ? ' collapsed' : ''));
+    d.innerHTML = `<h2>Layers <button type="button" aria-label="Show or hide key">Key &#9662;</button></h2><div class="body">` +
+      ORDER.map(k => `<label><input type="checkbox" data-k="${k}" checked><span class="sym">${legendSym(k)}</span>${STYLE[k].label}<span class="n">${data.layers[k].length.toLocaleString('en-US')}</span></label>`).join('') +
+      `<div class="note">Pits: active Schedule A and B pit registrations. CWD: approved commercial pits, treatment, reclamation, landfarm and land application sites. Upcoming and renewal: applications pending as of Aug. 31, 2026. Counts are sites; one site can hold several permits. Nine pits whose filed coordinates fall outside the service area are not shown.<br><br>
+      Source: Texas Railroad Commission, data through Aug. 31, 2026. Service area: <a href="https://www.episcopalhealth.org/who-we-are/about/our-service-area-map/" target="_blank" rel="noopener">Episcopal Health Foundation</a>.</div></div>`;
+    L.DomEvent.disableClickPropagation(d); L.DomEvent.disableScrollPropagation(d);
+    d.querySelector('h2 button').onclick = () => d.classList.toggle('collapsed');
+    d.querySelectorAll('input').forEach(i => i.onchange = () => i.checked ? groups[i.dataset.k].addTo(map) : map.removeLayer(groups[i.dataset.k]));
+    return d;
+  }});
+  new Legend().addTo(map);
+});
+</script>
+</body>
+</html>
